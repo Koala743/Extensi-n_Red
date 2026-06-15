@@ -1,0 +1,6 @@
+{
+  "name": "videosniffer-api",
+  "version": "1.0.0",
+  "description": "API para VideoSniffer Pro - recibe capturas de la extensión Chrome",
+  "private": true
+}
