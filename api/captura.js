@@ -17,15 +17,21 @@ function sanitizeString(val, max = 2048) {
 
 function detectarMediaPorMime(mime = "") {
   const m = mime.toLowerCase();
-  if (["video/mp4","video/webm","video/ogg","application/x-mpegurl","video/mp2t"].some(v => m.includes(v))) return "VIDEO";
+  if (["video/mp4","video/webm","video/ogg","application/x-mpegurl",
+       "video/mp2t","video/vnd.mpeg.dash.mpd","application/vnd.apple.mpegurl",
+       "application/dash+xml"].some(v => m.includes(v))) return "VIDEO";
   if (["image/jpeg","image/png","image/webp","image/gif","image/svg+xml","image/avif"].some(v => m.includes(v))) return "IMAGEN";
   return null;
 }
 
 function detectarMediaPorExtension(url = "") {
   try {
-    const ext = new URL(url).pathname.split(".").pop().toLowerCase();
-    if (["mp4","webm","ogg","m3u8","ts","mkv","avi","mov"].includes(ext)) return "VIDEO";
+    const path = new URL(url).pathname.toLowerCase();
+    const ext  = path.split(".").pop().split("?")[0];
+    if (["mp4","webm","ogg","mkv","avi","mov","m4v","3gp","flv"].includes(ext)) return "VIDEO_MP4";
+    if (["m3u8","m3u"].includes(ext)) return "VIDEO_HLS";
+    if (ext === "ts")                 return "VIDEO_TS";
+    if (ext === "mpd")                return "VIDEO_DASH";
     if (["jpg","jpeg","png","webp","gif","svg","avif","ico"].includes(ext)) return "IMAGEN";
   } catch {}
   return null;
@@ -34,19 +40,31 @@ function detectarMediaPorExtension(url = "") {
 async function detectarMediaPorContenido(url) {
   try {
     const resp = await fetch(url, {
-      headers: { Range: "bytes=0-11" },
+      headers: { Range: "bytes=0-188" },
       signal:  AbortSignal.timeout(4000),
     });
     if (!resp.ok) return null;
 
     const b = new Uint8Array(await resp.arrayBuffer());
 
+    // MP4 / ftyp box
     if (b[4]===0x66&&b[5]===0x74&&b[6]===0x79&&b[7]===0x70) return "VIDEO_MP4";
+    // WebM
     if (b[0]===0x1A&&b[1]===0x45&&b[2]===0xDF&&b[3]===0xA3) return "VIDEO_WEBM";
+    // Ogg
     if (b[0]===0x4F&&b[1]===0x67&&b[2]===0x67&&b[3]===0x53) return "VIDEO_OGG";
-    if (b[0]===0xFF&&b[1]===0xD8&&b[2]===0xFF)               return "IMAGEN_JPEG";
+    // MPEG-TS: sync byte 0x47 cada 188 bytes
+    if (b[0]===0x47 && (b[188]===0x47 || b.length<188)) return "VIDEO_TS";
+    // HLS playlist texto
+    const txt = new TextDecoder().decode(b.slice(0,20));
+    if (txt.startsWith("#EXTM3U")) return "VIDEO_HLS";
+    // JPEG
+    if (b[0]===0xFF&&b[1]===0xD8&&b[2]===0xFF) return "IMAGEN_JPEG";
+    // PNG
     if (b[0]===0x89&&b[1]===0x50&&b[2]===0x4E&&b[3]===0x47) return "IMAGEN_PNG";
+    // GIF
     if (b[0]===0x47&&b[1]===0x49&&b[2]===0x46&&b[3]===0x38) return "IMAGEN_GIF";
+    // WebP
     if (b[0]===0x52&&b[1]===0x49&&b[2]===0x46&&b[3]===0x46&&
         b[8]===0x57&&b[9]===0x45&&b[10]===0x42&&b[11]===0x50) return "IMAGEN_WEBP";
     return null;
