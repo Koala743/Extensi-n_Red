@@ -1,6 +1,7 @@
 if (!global._capturas)   global._capturas  = [];
 if (!global._maxItems)   global._maxItems  = 500;
 if (!global._sessionId)  global._sessionId = generateSessionId();
+if (!global._seq)        global._seq       = 0; // contador incremental: nunca se reasigna, nunca retrocede
 
 function generateSessionId() {
   return "sess_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
@@ -133,8 +134,20 @@ export default async function handler(req, res) {
       duplicado.duration_ms = item.duration_ms ?? duplicado.duration_ms;
       duplicado.size_bytes  = item.size_bytes  ?? duplicado.size_bytes;
       duplicado.importante  = esInteresante(duplicado);
-      return res.status(200).json({ ok: true, dedup: true, total: global._capturas.length });
+      // El duplicado NO cambia de seq: mantiene su posición numerada original.
+      return res.status(200).json({
+        ok: true, dedup: true,
+        total: global._capturas.length,
+        seq: duplicado.seq,
+        last_seq: global._seq,
+      });
     }
+
+    // Número de orden incremental: nunca se reasigna ni se reutiliza,
+    // sobrevive a recortes del buffer (maxItems) y a DELETE (que reinicia
+    // el contador solo si se pide explícitamente "reset_seq=true").
+    global._seq += 1;
+    item.seq = global._seq;
 
     item.importante = esInteresante(item);
     global._capturas.unshift(item);
@@ -143,14 +156,20 @@ export default async function handler(req, res) {
       global._capturas = global._capturas.slice(0, global._maxItems);
     }
 
-    return res.status(200).json({ ok: true, total: global._capturas.length });
+    return res.status(200).json({
+      ok: true,
+      total: global._capturas.length,
+      seq: item.seq,
+      last_seq: global._seq,
+    });
   }
 
   if (req.method === "GET") {
     const {
-      desde, tipo, dominio, session_id,
+      desde, desde_seq, tipo, dominio, session_id,
       media, importante, q,
       limit = 100, offset = 0,
+      orden = "seq_desc", // seq_desc (más nuevo primero, default para UI) | seq_asc (más viejo primero)
     } = req.query;
 
     let items = global._capturas;
@@ -161,6 +180,12 @@ export default async function handler(req, res) {
     if (media)                          items = items.filter(i => i.media_tipo?.startsWith(media));
     if (importante === "true")          items = items.filter(i => i.importante);
     if (desde)                          items = items.filter(i => i.ts > Number(desde));
+
+    // Sync incremental real: el cliente manda el último seq que ya tiene
+    // guardado y el servidor solo entrega lo que sea estrictamente más
+    // nuevo que eso (por número, no por timestamp).
+    if (desde_seq !== undefined)        items = items.filter(i => i.seq > Number(desde_seq));
+
     if (q) {
       const ql = q.toLowerCase();
       items = items.filter(i =>
@@ -168,6 +193,12 @@ export default async function handler(req, res) {
         i.tab_title.toLowerCase().includes(ql)
       );
     }
+
+    // Orden estable por número de secuencia (la fuente de verdad del
+    // orden cronológico; ts puede repetirse, seq nunca).
+    items = items.slice().sort((a, b) =>
+      orden === "seq_asc" ? a.seq - b.seq : b.seq - a.seq
+    );
 
     const total_filtrado = items.length;
     items = items.slice(Number(offset), Number(offset) + Number(limit));
@@ -177,6 +208,7 @@ export default async function handler(req, res) {
       total: global._capturas.length,
       total_filtrado,
       session_id: global._sessionId,
+      last_seq: global._seq,   // el panel guarda este número para el próximo "desde_seq"
       items,
     });
   }
@@ -184,7 +216,15 @@ export default async function handler(req, res) {
   if (req.method === "DELETE") {
     global._capturas = [];
     if (req.query.nueva_sesion === "true") global._sessionId = generateSessionId();
-    return res.status(200).json({ ok: true, total: 0, session_id: global._sessionId });
+    // El contador de secuencia NO se reinicia salvo pedido explícito:
+    // así un registro borrado nunca puede confundirse con uno futuro
+    // que reciba el mismo número.
+    if (req.query.reset_seq === "true") global._seq = 0;
+    return res.status(200).json({
+      ok: true, total: 0,
+      session_id: global._sessionId,
+      last_seq: global._seq,
+    });
   }
 
   return res.status(405).json({ error: "Método no permitido" });
